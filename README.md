@@ -3,7 +3,7 @@
 > Deterministic OS Reinstallation Engine for VPS and bare-metal servers.
 
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/version-2.0.0-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.1.0-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-VPS%20%7C%20Bare--metal-black.svg)](#)
 [![Arch](https://img.shields.io/badge/arch-x86__64-lightgrey.svg)](#)
 [![OS Support](https://img.shields.io/badge/support-Debian%2011%2F12%2F13%20%7C%20Ubuntu%2022.04%2F24.04-green.svg)](#)
@@ -231,6 +231,19 @@ It is not designed as a rescue panel replacement or a consumer desktop installer
 ---
 
 ## Changelog
+
+### v2.1.0
+
+- Fixed network detection on hosts with multi-IP interfaces (cloud VPS with main IP + alias addresses)
+- Fixed mixed IPv4/IPv6 default routes pointing at different interfaces (`ip -4` / `ip -6` now used explicitly)
+- Fixed disk detection to use awk exact-equality on the TYPE column instead of substring match
+- Added wget `--tries=3 --timeout=30/60` to both Debian netboot and Ubuntu cloud image downloads
+- Added qcow2 format pre-check via `qemu-img info` (catches HTML error pages saved as `.img`)
+- Ubuntu image download no longer uses `--continue` — stale images from a different release URL are removed first
+- Added IPv4 default-route guard: script now aborts cleanly if no default route is detected
+- Added qemu-nbd settle delay between disconnect and connect
+- Refactored systemd-networkd IPv6 block to use a single pre-built string instead of nested heredoc-in-command-substitution
+- No user-facing CLI changes — fully compatible with v2.0.0 invocation
 
 ### v2.0.0
 

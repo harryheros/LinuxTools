@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Project: OsNova - System Deployment & Reinstallation Engine
-# Version: 2.0.0
+# Version: 2.1.0
 # Description: BIOS + UEFI compatible automated network installer
 #              for Debian and Ubuntu systems on VPS and bare-metal servers.
 #
@@ -23,7 +23,7 @@ OS_TYPE="debian"
 RELEASE=""
 SSH_PORT="22"
 ROOT_PASS=""
-VERSION="2.0.0"
+VERSION="2.1.0"
 PASSWORD_WAS_GENERATED=0
 DNS_SERVERS="8.8.8.8 1.1.1.1"
 FORCE_MODE=0
@@ -284,8 +284,11 @@ if [ -d /sys/block ]; then
     done
 fi
 if [ -z "$REAL_DISK" ] && command -v lsblk >/dev/null; then
-    # Exclude loop, nbd, ram, and other virtual block devices
-    REAL_DISK="/dev/$(lsblk -dn -o NAME,TYPE | grep 'disk' | grep -vE '^(loop|nbd|ram|zram)' | awk '{print $1}' | head -n1)"
+    # Use awk's exact-equality filter instead of grep substring match,
+    # so a device name that happens to contain "disk" (extremely unlikely
+    # but theoretically possible) can't false-match the TYPE column.
+    # Exclude loop, nbd, ram, zram — these are not installation targets.
+    REAL_DISK="/dev/$(lsblk -dn -o NAME,TYPE | awk '$2=="disk" && $1 !~ /^(loop|nbd|ram|zram)/ {print $1; exit}')"
     # Validate we actually got something useful
     if [ "$REAL_DISK" = "/dev/" ] || [ -z "$REAL_DISK" ]; then
         REAL_DISK=""
@@ -299,15 +302,32 @@ if [ -z "$REAL_DISK" ]; then
 fi
 
 # --- Network Detection ---
-INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-V_IP=$(ip -4 addr show "$INTERFACE" | grep inet | awk '{print $2}' | cut -d/ -f1)
-V_GATEWAY=$(ip route | grep default | awk '{print $3}' | head -n1)
-V_PREFIX=$(ip -4 addr show "$INTERFACE" | grep inet | awk '{print $2}' | cut -d/ -f2)
+# Use ip -4 / ip -6 explicitly so an IPv6-only default route on a different
+# interface can't displace the IPv4 default. head -n1 on every variable
+# guards against multi-IP NICs (cloud VPS routinely have a main address
+# plus aliases) — without head, ${V_IP}/${V_PREFIX} would be e.g.
+# "1.2.3.4 5.6.7.8/32" and break every downstream config file.
+INTERFACE=$(ip -4 route show default | awk '{print $5; exit}')
+if [ -z "$INTERFACE" ]; then
+    echo -e "${RED}Error: No IPv4 default route detected. Cannot continue.${NC}"
+    echo -e "${YELLOW}Hint: verify the system has working IPv4 connectivity before running OsNova.${NC}"
+    exit 1
+fi
 
-# IPv6 detection (optional — not all VPS have IPv6)
-V_IP6=$(ip -6 addr show "$INTERFACE" | grep "inet6" | grep -v "fe80" | awk '{print $2}' | cut -d/ -f1 | head -n1)
-V_PREFIX6=$(ip -6 addr show "$INTERFACE" | grep "inet6" | grep -v "fe80" | awk '{print $2}' | cut -d/ -f2 | head -n1)
-V_GATEWAY6=$(ip -6 route | grep default | awk '{print $3}' | head -n1)
+V_IP=$(ip -4 addr show "$INTERFACE" | awk '/inet / {print $2; exit}' | cut -d/ -f1)
+V_PREFIX=$(ip -4 addr show "$INTERFACE" | awk '/inet / {print $2; exit}' | cut -d/ -f2)
+V_GATEWAY=$(ip -4 route show default | awk '{print $3; exit}')
+
+if [ -z "$V_IP" ] || [ -z "$V_PREFIX" ] || [ -z "$V_GATEWAY" ]; then
+    echo -e "${RED}Error: Could not determine IPv4 configuration for ${INTERFACE}.${NC}"
+    echo -e "${YELLOW}Detected: IP='${V_IP}' prefix='${V_PREFIX}' gw='${V_GATEWAY}'${NC}"
+    exit 1
+fi
+
+# IPv6 detection (optional — not all VPS have IPv6). Same head-n1 hygiene.
+V_IP6=$(ip -6 addr show "$INTERFACE" | awk '/inet6 / && !/fe80/ {print $2; exit}' | cut -d/ -f1)
+V_PREFIX6=$(ip -6 addr show "$INTERFACE" | awk '/inet6 / && !/fe80/ {print $2; exit}' | cut -d/ -f2)
+V_GATEWAY6=$(ip -6 route show default | awk '{print $3; exit}')
 
 prefix_to_mask() {
     local i mask=""
@@ -369,7 +389,9 @@ install_debian() {
     echo -e "\n${BOLD}${CYAN}Step: Fetching Debian network installer...${NC}"
 
     MIRROR="https://deb.debian.org/debian/dists/${REL_NAME}/main/installer-amd64/current/images/netboot/"
-    wget -O "${WORKDIR}/netboot.tar.gz" "${MIRROR}netboot.tar.gz"
+    # --tries=3 --timeout=30: transient hiccups (mirror DNS jitter, brief TLS
+    # reset) shouldn't force the operator to restart the entire reinstall.
+    wget --tries=3 --timeout=30 -O "${WORKDIR}/netboot.tar.gz" "${MIRROR}netboot.tar.gz"
 
     # Determine if /32 prefix requires GatewayOnLink
     if [ "$V_PREFIX" = "32" ]; then
@@ -384,15 +406,31 @@ GatewayOnLink=yes"
         NETWORKD_ROUTE_EXTRA=""
     fi
 
-    # Determine if IPv6 /128 prefix requires GatewayOnLink
-    NETWORKD_IPV6_ROUTE_EXTRA=""
-    if [ -n "$V_IP6" ] && [ -n "$V_PREFIX6" ] && [ -n "$V_GATEWAY6" ]; then
-        if [ "$V_PREFIX6" = "128" ]; then
-            NETWORKD_IPV6_ROUTE_EXTRA="
+    # IPv6 block (computed entirely here, then dropped verbatim into the
+    # systemd-networkd config via a single heredoc — much easier to read
+    # than the previous nested heredoc-inside-command-substitution form,
+    # and uses the outer script's V_IP6/V_PREFIX6/V_GATEWAY6 directly
+    # without needing the post-install stage to re-resolve them).
+    NETWORKD_IPV6_BLOCK=""
+    if [ -n "$V_IP6" ] && [ -n "$V_PREFIX6" ]; then
+        NETWORKD_IPV6_BLOCK="
+[Address]
+Address=${V_IP6}/${V_PREFIX6}"
+        if [ -n "$V_GATEWAY6" ]; then
+            if [ "$V_PREFIX6" = "128" ]; then
+                NETWORKD_IPV6_BLOCK="${NETWORKD_IPV6_BLOCK}
+
 [Route]
-Destination=::/0
 Gateway=${V_GATEWAY6}
+Destination=::/0
 GatewayOnLink=yes"
+            else
+                NETWORKD_IPV6_BLOCK="${NETWORKD_IPV6_BLOCK}
+
+[Route]
+Gateway=${V_GATEWAY6}
+Destination=::/0"
+            fi
         fi
     fi
 
@@ -438,39 +476,8 @@ Address=${V_IP}/${V_PREFIX}
 ${NETWORKD_GATEWAY}
 $(echo "${DNS_SERVERS}" | tr ' ' '\n' | sed 's/^/DNS=/')
 ${NETWORKD_ROUTE_EXTRA}
+${NETWORKD_IPV6_BLOCK}
 EOF
-
-$(if [ -n "${V_IP6}" ] && [ -n "${V_PREFIX6}" ]; then
-cat <<IPV6BLOCK
-cat >> /etc/systemd/network/10-static.network <<EOF2
-
-[Address]
-Address=${V_IP6}/${V_PREFIX6}
-EOF2
-$(if [ -n "${V_GATEWAY6}" ]; then
-  if [ "${V_PREFIX6}" = "128" ]; then
-cat <<GW6BLOCK
-cat >> /etc/systemd/network/10-static.network <<EOF3
-
-[Route]
-Gateway=${V_GATEWAY6}
-Destination=::/0
-GatewayOnLink=yes
-EOF3
-GW6BLOCK
-  else
-cat <<GW6BLOCK
-cat >> /etc/systemd/network/10-static.network <<EOF3
-
-[Route]
-Gateway=${V_GATEWAY6}
-Destination=::/0
-EOF3
-GW6BLOCK
-  fi
-fi)
-IPV6BLOCK
-fi)
 
 # Enable systemd-networkd, disable legacy networking
 systemctl enable systemd-networkd
@@ -563,11 +570,26 @@ install_ubuntu() {
     esac
 
     IMG_PATH="/var/tmp/ubuntu-cloud.img"
+    # Remove stale image from any previous run. --continue would otherwise
+    # try to resume into a file from a different release URL, producing a
+    # spliced binary that qemu-img check might or might not catch.
+    rm -f "${IMG_PATH}"
     echo -e "${CYAN}Downloading Ubuntu cloud image (~600MB)...${NC}"
-    wget --continue --show-progress -O "${IMG_PATH}" "${IMG_URL}"
+    wget --tries=3 --timeout=60 --show-progress -O "${IMG_PATH}" "${IMG_URL}"
 
-    # Verify image integrity
+    # Verify image integrity. Two-step:
+    #   1. qemu-img info — confirms the file is parseable AND in qcow2 format.
+    #      This guards against the upstream URL accidentally returning HTML
+    #      (e.g. an HTTP 404 page wget happens to save), or a future Ubuntu
+    #      release switching to raw images without us noticing.
+    #   2. qemu-img check — verifies internal consistency of the qcow2 file.
     echo -e "${CYAN}Verifying image integrity...${NC}"
+    if ! qemu-img info "${IMG_PATH}" 2>/dev/null | grep -q 'file format: qcow2'; then
+        echo -e "${RED}Error: Downloaded file is not a qcow2 image.${NC}"
+        echo -e "${YELLOW}Most likely an incomplete download or an HTML error page from the mirror.${NC}"
+        rm -f "${IMG_PATH}"
+        exit 1
+    fi
     if ! qemu-img check "${IMG_PATH}" >/dev/null 2>&1; then
         echo -e "${RED}Error: Downloaded image failed integrity check.${NC}"
         echo -e "${YELLOW}The file may be corrupted or incomplete. Please try again.${NC}"
@@ -579,7 +601,12 @@ install_ubuntu() {
     echo -e "${CYAN}Mounting QCOW2 image via NBD...${NC}"
     modprobe nbd max_part=16
     sleep 1
+    # Disconnect first in case a previous OsNova attempt left /dev/nbd0
+    # bound, then give the kernel a moment to release it before binding
+    # again — sometimes a back-to-back disconnect/connect races and the
+    # second qemu-nbd silently picks up stale state.
     qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
+    sleep 1
     qemu-nbd --connect=/dev/nbd0 "${IMG_PATH}"
     sleep 2
 
