@@ -75,7 +75,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/harryheros/osnova/main/os/re
 Full example:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/harryheros/osnova/main/os/reinstall.sh) -u 24 -p "SecurePassword" --port 2222 --dns "8.8.8.8 1.1.1.1" --force
+bash <(curl -fsSL https://raw.githubusercontent.com/harryheros/osnova/main/os/reinstall.sh) -u 24 -p "SecurePassword" --port 2222 --dns "8.8.8.8 8.8.4.4" --force
 ```
 
 ---
@@ -192,7 +192,7 @@ Characters that could interfere with shell expansion or preseed parsing are reje
 - SSH is configured to allow root login and password authentication  
 - The detected primary disk is used as the installation target  
 - Current network settings are reused for static configuration  
-- Default DNS servers are 8.8.8.8 and 1.1.1.1 unless overridden  
+- Default DNS servers are 8.8.8.8 and 8.8.4.4 unless overridden  
 - If --dns is provided, those DNS servers are written into the installed system  
 
 ---
