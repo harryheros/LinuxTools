@@ -468,23 +468,42 @@ Destination=::/0"
 set -e
 
 # --- SSH config ---
-# Use sshd_config.d override for reliability (Debian 12+ supports this)
+# Primary mechanism: a sshd_config.d drop-in (Debian 12+/Ubuntu read these via
+# the Include at the top of sshd_config, and first-match-wins means our values
+# take effect). chmod 644 is REQUIRED — sshd refuses to load a drop-in that is
+# group/other-writable and silently ignores it.
 mkdir -p /etc/ssh/sshd_config.d
 cat > /etc/ssh/sshd_config.d/99-osnova.conf <<'SSHEOF'
 PermitRootLogin yes
 PasswordAuthentication yes
 Port ${SSH_PORT}
 SSHEOF
+chmod 644 /etc/ssh/sshd_config.d/99-osnova.conf
 
-# Also patch main config as fallback for older systems
-sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config
-sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-# Handle Port: replace existing or append if missing
-if grep -qE '^#?\s*Port\s' /etc/ssh/sshd_config; then
-    sed -i 's/^#\?\s*Port\s.*/Port ${SSH_PORT}/g' /etc/ssh/sshd_config
-else
-    echo "Port ${SSH_PORT}" >> /etc/ssh/sshd_config
+# Fallback: also patch the main config for systems without an Include line.
+# Guarded with a file-existence test and || true so that a missing or unusual
+# main config can never abort this script under set -e (which would otherwise
+# skip the BBR/network steps below).
+if [ -f /etc/ssh/sshd_config ]; then
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config || true
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config || true
+    if grep -qE '^#?\s*Port\s' /etc/ssh/sshd_config; then
+        sed -i 's/^#\?\s*Port\s.*/Port ${SSH_PORT}/g' /etc/ssh/sshd_config || true
+    else
+        echo "Port ${SSH_PORT}" >> /etc/ssh/sshd_config
+    fi
 fi
+
+# Debian ships ssh as socket-activated (ssh.socket), whose ListenStream=22
+# OVERRIDES the Port in sshd_config — so a custom port silently fails to take
+# effect. Disable the socket unit and fall back to the classic ssh.service so
+# the configured Port is the one that listens. Guarded for chroot (no running
+# systemd) and for systems that don't use the socket.
+if [ -e /lib/systemd/system/ssh.socket ] || [ -e /etc/systemd/system/ssh.socket ]; then
+    systemctl disable ssh.socket 2>/dev/null || true
+    rm -f /etc/systemd/system/ssh.service.requires/ssh.socket 2>/dev/null || true
+fi
+systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
 
 # --- BBR ---
 cat > /etc/sysctl.d/99-osnova-bbr.conf <<'BBREOF'
@@ -509,7 +528,10 @@ ${NETWORKD_IPV6_BLOCK}
 EOF
 
 # Enable systemd-networkd, disable legacy networking
-systemctl enable systemd-networkd
+# In the d-i chroot there is no running systemd/D-Bus, so these can return
+# non-zero even when the symlink is created correctly. Guard with || true so
+# set -e does not abort the script (which would skip the steps below).
+systemctl enable systemd-networkd 2>/dev/null || true
 systemctl disable networking 2>/dev/null || true
 
 # Disable /etc/network/interfaces to avoid conflict
@@ -559,6 +581,12 @@ d-i mirror/suite string ${REL_NAME}
 d-i apt-setup/use_mirror boolean true
 
 tasksel tasksel/first multiselect standard, ssh-server
+# Belt-and-suspenders: explicitly include openssh-server. The ssh-server
+# tasksel entry can be skipped on some mirrors/releases, which would leave the
+# box with no sshd at all — sshd_config edits then apply to nothing and the
+# host is unreachable. pkgsel/include guarantees the package is installed.
+d-i pkgsel/include string openssh-server
+d-i pkgsel/upgrade select none
 
 # Wipe any pre-existing LVM/MD/partition signatures BEFORE partman scans the
 # disk. On VPS that were previously provisioned with LVM or software RAID,
@@ -605,15 +633,10 @@ d-i finish-install/reboot_in_progress note
 # to the target so it can be inspected post-boot if SSH still fails.
 d-i preseed/late_command string \
     for p in /post-install.sh /cdrom/post-install.sh /preseed/post-install.sh /var/lib/preseed/post-install.sh; do \
-        if [ -f "\$p" ]; then SRC="\$p"; break; fi; \
+        if [ -f "\$p" ]; then cp "\$p" /target/tmp/post-install.sh; break; fi; \
     done; \
-    if [ -n "\$SRC" ]; then \
-        cp "\$SRC" /target/tmp/post-install.sh && \
-        in-target chmod +x /tmp/post-install.sh && \
-        in-target sh /tmp/post-install.sh > /target/var/log/osnova-postinstall.log 2>&1; \
-    else \
-        echo "OsNova: post-install.sh not found in initrd" > /target/var/log/osnova-postinstall.log; \
-    fi; \
+    in-target chmod +x /tmp/post-install.sh; \
+    in-target /tmp/post-install.sh; \
     sync; sleep 3
 PRESEEDTAILEOF
 
