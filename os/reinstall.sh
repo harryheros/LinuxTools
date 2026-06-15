@@ -25,7 +25,7 @@ SSH_PORT="22"
 ROOT_PASS=""
 VERSION="2.1.0"
 PASSWORD_WAS_GENERATED=0
-DNS_SERVERS="8.8.8.8 1.1.1.1"
+DNS_SERVERS="8.8.8.8 8.8.4.4"
 FORCE_MODE=0
 
 generate_random_password() {
@@ -44,7 +44,7 @@ show_help() {
     echo -e "  ${YELLOW}-u [22|24]${NC}              Install Ubuntu (default: 24)"
     echo -e "  ${YELLOW}-p PASSWORD${NC}             Set root password (optional)"
     echo -e "  ${YELLOW}-port PORT, --port PORT${NC} Set SSH port (default: 22)"
-    echo -e "  ${YELLOW}--dns \"IP1 IP2\"${NC}         Set DNS servers (default: 8.8.8.8 1.1.1.1)"
+    echo -e "  ${YELLOW}--dns \"IP1 IP2\"${NC}         Set DNS servers (default: 8.8.8.8 8.8.4.4)"
     echo -e "  ${YELLOW}-f, --force${NC}             Skip confirmation prompt"
     echo -e "  ${YELLOW}-v, --version${NC}           Show version info"
     echo -e "  ${YELLOW}-h, --help${NC}              Show this help"
