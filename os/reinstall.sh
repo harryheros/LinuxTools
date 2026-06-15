@@ -632,10 +632,9 @@ d-i finish-install/reboot_in_progress note
 # than silently rebooting into a half-configured network. All output is logged
 # to the target so it can be inspected post-boot if SSH still fails.
 d-i preseed/late_command string \
-    for p in /post-install.sh /cdrom/post-install.sh /preseed/post-install.sh /var/lib/preseed/post-install.sh; do \
-        if [ -f "\$p" ]; then cp "\$p" /target/tmp/post-install.sh; break; fi; \
-    done; \
-    in-target chmod +x /tmp/post-install.sh; \
+    mkdir -p /target/tmp; \
+    cp /post-install.sh /target/tmp/post-install.sh && \
+    in-target chmod +x /tmp/post-install.sh && \
     in-target /tmp/post-install.sh; \
     sync; sleep 3
 PRESEEDTAILEOF
