@@ -27,6 +27,7 @@ VERSION="2.2.0"
 PASSWORD_WAS_GENERATED=0
 DNS_SERVERS="8.8.8.8 8.8.4.4"
 FORCE_MODE=0
+IPV6_USABLE=1
 
 generate_random_password() {
     tr -dc 'A-Za-z0-9!@#%^*_+=' </dev/urandom | head -c 20
@@ -329,6 +330,34 @@ V_IP6=$(ip -6 addr show "$INTERFACE" | awk '/inet6 / && !/fe80/ {print $2; exit}
 V_PREFIX6=$(ip -6 addr show "$INTERFACE" | awk '/inet6 / && !/fe80/ {print $2; exit}' | cut -d/ -f2)
 V_GATEWAY6=$(ip -6 route show default | awk '{print $3; exit}')
 
+# IPv6 reachability validation. Some VPS (common on budget providers) hand out
+# an IPv6 address and even a default route that does NOT actually work — the
+# upstream simply doesn't route IPv6. Detecting the address alone is not enough:
+# if we carry a half-broken IPv6 into the install, the Debian netboot installer
+# tries the AAAA record of deb.debian.org when fetching udebs, times out, and
+# stalls at a random "Retrieving *-udeb" step. We therefore probe actual
+# connectivity and DISABLE IPv6 entirely if it fails — degrading cleanly to
+# IPv4-only. Machines with working IPv6 keep full dual-stack; IPv4-only machines
+# are unaffected.
+if [ -n "$V_IP6" ] && [ -n "$V_GATEWAY6" ]; then
+    # Only trust the probe if a v6-capable ping tool actually exists; otherwise
+    # a missing tool would falsely "fail" the test and wrongly disable working
+    # IPv6. If no tool is available, keep the old behavior (assume usable).
+    if command -v ping6 >/dev/null 2>&1 || command -v ping >/dev/null 2>&1; then
+        # Try gateway first (fast, local), then a public anycast as a second chance.
+        if ping6 -c1 -W2 "$V_GATEWAY6" >/dev/null 2>&1 \
+           || ping -6 -c1 -W2 "$V_GATEWAY6" >/dev/null 2>&1 \
+           || ping6 -c1 -W3 2606:4700:4700::1111 >/dev/null 2>&1 \
+           || ping -6 -c1 -W3 2606:4700:4700::1111 >/dev/null 2>&1; then
+            : # IPv6 works — keep it
+        else
+            echo -e "${YELLOW}IPv6 address detected but not reachable — disabling IPv6 (IPv4-only install).${NC}"
+            V_IP6=""; V_PREFIX6=""; V_GATEWAY6=""
+            IPV6_USABLE=0
+        fi
+    fi
+fi
+
 prefix_to_mask() {
     local i mask=""
     local full_octets=$(($1 / 8))
@@ -607,7 +636,16 @@ PRESEEDTAILEOF
     FIRST_DNS=$(echo "${DNS_SERVERS}" | awk '{print $1}')
     NET_APPEND="netcfg/disable_autoconfig=true netcfg/get_ipaddress=${V_IP} netcfg/get_netmask=${V_NETMASK} netcfg/get_gateway=${V_GATEWAY} netcfg/get_nameservers=${FIRST_DNS} netcfg/confirm_static=true netcfg/get_hostname=debian netcfg/get_domain=localdomain"
     MIRROR_APPEND="mirror/http/hostname=deb.debian.org mirror/http/directory=/debian mirror/suite=${REL_NAME}"
-    KERNEL_APPEND="auto=true priority=critical file=/preseed.cfg locale=en_US.UTF-8 keymap=us hostname=debian domain=localdomain ${NET_APPEND} ${MIRROR_APPEND} vga=788 --- quiet"
+    # If IPv6 was found unusable (address present but unreachable), disable it at
+    # the kernel level for the installer. Otherwise d-i resolves deb.debian.org's
+    # AAAA record, tries IPv6 to fetch udebs, times out, and stalls at a random
+    # "Retrieving *-udeb" step. ipv6.disable=1 forces the whole udeb fetch over
+    # IPv4. Working-IPv6 and IPv4-only machines never reach this branch.
+    IPV6_APPEND=""
+    if [ "$IPV6_USABLE" -eq 0 ]; then
+        IPV6_APPEND="ipv6.disable=1"
+    fi
+    KERNEL_APPEND="auto=true priority=critical file=/preseed.cfg locale=en_US.UTF-8 keymap=us hostname=debian domain=localdomain ${NET_APPEND} ${MIRROR_APPEND} ${IPV6_APPEND} vga=788 --- quiet"
     GRUB_TITLE="OsNova-Debian${RELEASE}"
     UBUNTU_CLOUD=0
 }

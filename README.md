@@ -234,7 +234,8 @@ It is not designed as a rescue panel replacement or a consumer desktop installer
 
 ### v2.2.0
 
-- Fixed Debian installer hang at "Loading additional components / Retrieving *.udeb" by adding an explicit mirror block (`mirror/http/hostname`, `directory`, `suite`) to both the preseed and the kernel command line — previously no mirror was specified, so the installer had no host to fetch udebs from
+- Fixed Debian installer hang at "Loading additional components / Retrieving *.udeb" on hosts with broken IPv6: the script now probes actual IPv6 reachability and, if an address is present but unroutable (common on budget VPS), disables IPv6 for both the installer (`ipv6.disable=1` on the kernel cmdline) and the installed system — degrading cleanly to IPv4-only. Hosts with working IPv6 keep full dual-stack; IPv4-only hosts are unaffected
+- Fixed Debian installer hang by adding an explicit mirror block (`mirror/http/hostname`, `directory`, `suite`) to both the preseed and the kernel command line — previously no mirror was specified, so the installer had no host to fetch udebs from
 - Fixed `netcfg/get_nameservers` passing a space-separated DNS list (d-i treats it as a single token, breaking udeb-stage DNS); the installer now uses the first DNS, while the full list is still written into the installed system
 - Added `netcfg/get_hostname` and `netcfg/get_domain` to prevent hidden prompts when DNS is unstable
 - Made `preseed/late_command` robust: searches multiple known locations for `post-install.sh`, uses `&&` chaining so failures surface, and logs to `/var/log/osnova-postinstall.log` in the target system
