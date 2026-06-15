@@ -3,7 +3,7 @@
 > Deterministic OS Reinstallation Engine for VPS and bare-metal servers.
 
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/version-2.1.0-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.2.0-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-VPS%20%7C%20Bare--metal-black.svg)](#)
 [![Arch](https://img.shields.io/badge/arch-x86__64-lightgrey.svg)](#)
 [![OS Support](https://img.shields.io/badge/support-Debian%2011%2F12%2F13%20%7C%20Ubuntu%2022.04%2F24.04-green.svg)](#)
@@ -231,6 +231,17 @@ It is not designed as a rescue panel replacement or a consumer desktop installer
 ---
 
 ## Changelog
+
+### v2.2.0
+
+- Fixed Debian installer hang at "Loading additional components / Retrieving *.udeb" by adding an explicit mirror block (`mirror/http/hostname`, `directory`, `suite`) to both the preseed and the kernel command line — previously no mirror was specified, so the installer had no host to fetch udebs from
+- Fixed `netcfg/get_nameservers` passing a space-separated DNS list (d-i treats it as a single token, breaking udeb-stage DNS); the installer now uses the first DNS, while the full list is still written into the installed system
+- Added `netcfg/get_hostname` and `netcfg/get_domain` to prevent hidden prompts when DNS is unstable
+- Made `preseed/late_command` robust: searches multiple known locations for `post-install.sh`, uses `&&` chaining so failures surface, and logs to `/var/log/osnova-postinstall.log` in the target system
+- post-install.sh is now staged in multiple initrd locations so it survives regardless of d-i build layout
+- Added `partman/early_command` to wipe pre-existing LVM/MD/partition signatures (`vgchange`, `pvremove`, `mdadm --stop`, `wipefs`) plus `partman-lvm/device_remove_lvm` and `partman-md/device_remove_md`, preventing silent partitioner hangs on previously-provisioned disks
+- Switched GRUB default selection to the canonical `GRUB_DEFAULT=saved` + `grub-set-default`/`grub-reboot` method and forced `GRUB_DISABLE_SUBMENU=y`, so the installer entry boots reliably even when GRUB builds a submenu
+- No user-facing CLI changes — fully compatible with v2.1.0 invocation
 
 ### v2.1.0
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Project: OsNova - System Deployment & Reinstallation Engine
-# Version: 2.1.0
+# Version: 2.2.0
 # Description: BIOS + UEFI compatible automated network installer
 #              for Debian and Ubuntu systems on VPS and bare-metal servers.
 #
@@ -23,7 +23,7 @@ OS_TYPE="debian"
 RELEASE=""
 SSH_PORT="22"
 ROOT_PASS=""
-VERSION="2.1.0"
+VERSION="2.2.0"
 PASSWORD_WAS_GENERATED=0
 DNS_SERVERS="8.8.8.8 8.8.4.4"
 FORCE_MODE=0
@@ -499,20 +499,55 @@ d-i console-setup/ask_detect boolean false
 d-i keyboard-configuration/xkb-keymap select us
 d-i netcfg/choose_interface select auto
 d-i netcfg/disable_autoconfig boolean true
+d-i hw-detect/load_firmware boolean false
 PRESEEDEOF
 
     # Append network and disk config (these contain variables, use expanding heredoc)
+    # NOTE: netcfg/get_nameservers must be a SINGLE address for d-i — a
+    # space-separated list breaks udeb-stage DNS resolution (the installer
+    # uses it verbatim as one token). Use the first DNS for the installer;
+    # the full DNS_SERVERS list is still written into the final system by
+    # post-install.sh. The mirror/* block is REQUIRED: without it the
+    # installer stalls at "Loading additional components / Retrieving *.udeb"
+    # because it has no mirror host to fetch udebs from.
+    FIRST_DNS=$(echo "${DNS_SERVERS}" | awk '{print $1}')
     cat >> "${WORKDIR}/preseed.cfg" <<EOF
 d-i netcfg/get_ipaddress string ${V_IP}
 d-i netcfg/get_netmask string ${V_NETMASK}
 d-i netcfg/get_gateway string ${V_GATEWAY}
-d-i netcfg/get_nameservers string ${DNS_SERVERS}
+d-i netcfg/get_nameservers string ${FIRST_DNS}
 d-i netcfg/confirm_static boolean true
+d-i netcfg/get_hostname string debian
+d-i netcfg/get_domain string localdomain
+d-i netcfg/hostname string debian
+
+d-i mirror/country string manual
+d-i mirror/protocol string http
+d-i mirror/http/hostname string deb.debian.org
+d-i mirror/http/directory string /debian
+d-i mirror/http/proxy string
+d-i mirror/suite string ${REL_NAME}
+d-i apt-setup/use_mirror boolean true
 
 tasksel tasksel/first multiselect standard, ssh-server
 
+# Wipe any pre-existing LVM/MD/partition signatures BEFORE partman scans the
+# disk. On VPS that were previously provisioned with LVM or software RAID,
+# partman otherwise stops to ask about active volume groups / md arrays —
+# a prompt that priority=critical cannot auto-answer, causing a silent hang.
+d-i partman/early_command string \
+    disk="${REAL_DISK}"; \
+    vgchange -an 2>/dev/null || true; \
+    for v in \$(pvs --noheadings -o pv_name 2>/dev/null | grep "\$disk"); do pvremove -ff -y "\$v" 2>/dev/null || true; done; \
+    mdadm --stop --scan 2>/dev/null || true; \
+    wipefs -a "\$disk" 2>/dev/null || true
+
 d-i partman-auto/disk string ${REAL_DISK}
 d-i partman-auto/method string regular
+d-i partman-lvm/device_remove_lvm boolean true
+d-i partman-md/device_remove_md boolean true
+d-i partman-lvm/confirm boolean true
+d-i partman-lvm/confirm_nooverwrite boolean true
 d-i partman-auto/choose_recipe select atomic
 d-i partman-partitioning/confirm_write_new_label boolean true
 d-i partman/choose_partition select finish
@@ -533,10 +568,23 @@ EOF
     cat >> "${WORKDIR}/preseed.cfg" <<'PRESEEDTAILEOF'
 d-i finish-install/reboot_in_progress note
 
+# late_command runs in the d-i environment (not the target). We search a few
+# known locations for post-install.sh because where it survives depends on the
+# d-i build: initrd root (/), the preseed dir, or /var/lib/preseed. Chaining
+# with && (not ;) so a copy/run failure is visible in /var/log/syslog rather
+# than silently rebooting into a half-configured network. All output is logged
+# to the target so it can be inspected post-boot if SSH still fails.
 d-i preseed/late_command string \
-    cp /post-install.sh /target/tmp/post-install.sh; \
-    in-target chmod +x /tmp/post-install.sh; \
-    in-target /tmp/post-install.sh; \
+    for p in /post-install.sh /cdrom/post-install.sh /preseed/post-install.sh /var/lib/preseed/post-install.sh; do \
+        if [ -f "\$p" ]; then SRC="\$p"; break; fi; \
+    done; \
+    if [ -n "\$SRC" ]; then \
+        cp "\$SRC" /target/tmp/post-install.sh && \
+        in-target chmod +x /tmp/post-install.sh && \
+        in-target sh /tmp/post-install.sh > /target/var/log/osnova-postinstall.log 2>&1; \
+    else \
+        echo "OsNova: post-install.sh not found in initrd" > /target/var/log/osnova-postinstall.log; \
+    fi; \
     sync; sleep 3
 PRESEEDTAILEOF
 
@@ -544,7 +592,11 @@ PRESEEDTAILEOF
     mkdir -p initrd_work && cd initrd_work
     gzip -dc "../debian-installer/amd64/initrd.gz" | cpio -idmu >/dev/null 2>&1
     cp "${WORKDIR}/preseed.cfg" ./preseed.cfg
+    # Place post-install.sh in several locations the late_command searches,
+    # so it survives regardless of how this d-i build lays out its root.
     cp "${WORKDIR}/post-install.sh" ./post-install.sh
+    mkdir -p ./preseed && cp "${WORKDIR}/post-install.sh" ./preseed/post-install.sh
+    chmod +x ./post-install.sh ./preseed/post-install.sh
 
     rm -f /boot/vmlinuz-*osnova /boot/initrd-*osnova.gz 2>/dev/null
     find . | cpio -H newc -o 2>/dev/null | gzip -1 > /boot/initrd-debian${RELEASE}-osnova.gz
@@ -552,8 +604,10 @@ PRESEEDTAILEOF
 
     KERNEL_PATH="/boot/vmlinuz-debian${RELEASE}-osnova"
     INITRD_PATH="/boot/initrd-debian${RELEASE}-osnova.gz"
-    NET_APPEND="netcfg/disable_autoconfig=true netcfg/get_ipaddress=${V_IP} netcfg/get_netmask=${V_NETMASK} netcfg/get_gateway=${V_GATEWAY} netcfg/get_nameservers=\"${DNS_SERVERS}\" netcfg/confirm_static=true"
-    KERNEL_APPEND="auto=true priority=critical file=/preseed.cfg locale=en_US.UTF-8 keymap=us hostname=debian ${NET_APPEND} vga=788 --- quiet"
+    FIRST_DNS=$(echo "${DNS_SERVERS}" | awk '{print $1}')
+    NET_APPEND="netcfg/disable_autoconfig=true netcfg/get_ipaddress=${V_IP} netcfg/get_netmask=${V_NETMASK} netcfg/get_gateway=${V_GATEWAY} netcfg/get_nameservers=${FIRST_DNS} netcfg/confirm_static=true netcfg/get_hostname=debian netcfg/get_domain=localdomain"
+    MIRROR_APPEND="mirror/http/hostname=deb.debian.org mirror/http/directory=/debian mirror/suite=${REL_NAME}"
+    KERNEL_APPEND="auto=true priority=critical file=/preseed.cfg locale=en_US.UTF-8 keymap=us hostname=debian domain=localdomain ${NET_APPEND} ${MIRROR_APPEND} vga=788 --- quiet"
     GRUB_TITLE="OsNova-Debian${RELEASE}"
     UBUNTU_CLOUD=0
 }
@@ -786,11 +840,36 @@ menuentry '${GRUB_TITLE}' {
 }
 EOF
     chmod +x /etc/grub.d/40_custom
-    sed -i "s/GRUB_DEFAULT=.*/GRUB_DEFAULT=\"${GRUB_TITLE}\"/" /etc/default/grub
+
+    # Selecting the default by menuentry TITLE only works when the entry is at
+    # the top level. If GRUB builds a submenu (default on many distros), named
+    # entries get nested and "GRUB_DEFAULT=title" silently fails — the box
+    # boots the OLD kernel and the reinstall never starts. The canonical fix is
+    # GRUB_DEFAULT=saved + grub-set-default, which resolves the title against
+    # grubenv and works regardless of nesting. Also force top-level for safety.
+    sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
+    echo "GRUB_DEFAULT=saved" >> /etc/default/grub
+    sed -i '/^GRUB_DISABLE_SUBMENU=/d' /etc/default/grub
+    echo "GRUB_DISABLE_SUBMENU=y" >> /etc/default/grub
+    sed -i '/^GRUB_TIMEOUT=/d' /etc/default/grub
+    echo "GRUB_TIMEOUT=5" >> /etc/default/grub
+    sed -i '/^GRUB_TIMEOUT_STYLE=/d' /etc/default/grub
+    echo "GRUB_TIMEOUT_STYLE=menu" >> /etc/default/grub
     # Idempotent: remove existing line before appending
     sed -i '/^GRUB_DISABLE_OS_PROBER=/d' /etc/default/grub
     echo "GRUB_DISABLE_OS_PROBER=true" >> /etc/default/grub
     update-grub || grub2-mkconfig -o /boot/grub/grub.cfg
+
+    # Now point the saved default at our entry by exact title. grub-set-default
+    # writes grubenv, which GRUB_DEFAULT=saved reads at boot. Try persistent
+    # set first, then grub-reboot as a one-shot guarantee for the next boot.
+    if command -v grub-set-default >/dev/null 2>&1; then
+        grub-set-default "${GRUB_TITLE}" 2>/dev/null || true
+        grub-reboot "${GRUB_TITLE}" 2>/dev/null || true
+    elif command -v grub2-set-default >/dev/null 2>&1; then
+        grub2-set-default "${GRUB_TITLE}" 2>/dev/null || true
+        grub2-reboot "${GRUB_TITLE}" 2>/dev/null || true
+    fi
 fi
 
 # ==============================================================================
