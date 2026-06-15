@@ -166,7 +166,7 @@ Ubuntu path:
 | `-u [22\|24]` | Install Ubuntu (default: 24) |
 | `-p PASSWORD` | Set root password |
 | `-port PORT`, `--port PORT` | Set SSH port (default: 22) |
-| `--dns "IP1 IP2"` | Set DNS servers (default: 8.8.8.8 8.&.4.4) |
+| `--dns "IP1 IP2"` | Set DNS servers (default: 8.8.8.8 8.8.4.4) |
 | `-f`, `--force` | Skip confirmation prompt |
 | `-v`, `--version` | Show version info |
 | `-h`, `--help` | Show help |
